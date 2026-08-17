@@ -47,5 +47,26 @@ async def main():
     print("✅ Бот запущен на Python 3.11!")
     await dp.start_polling(bot)
 
+# ===== НОВЫЙ КОД ДЛЯ RENDER: ЗАПУСКАЕМ ВЕБ-СЕРВЕР =====
+from aiohttp import web
+
+async def health_check(request):
+    return web.Response(text="I'm alive!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 10000)))
+    await site.start()
+    print(f"✅ Веб-сервер запущен на порту {os.environ.get('PORT', 10000)}")
+    # Держим сервер запущенным бесконечно
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Запускаем бота и веб-сервер параллельно
+    loop = asyncio.get_event_loop()
+    loop.create_task(main())
+    loop.run_until_complete(start_web_server())
+
