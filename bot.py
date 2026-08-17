@@ -4,8 +4,10 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message
 from openai import AsyncOpenAI
 
-TELEGRAM_TOKEN = os.getenv("8809329498:AAHQN3R8oyfXXWkEDmZkKArcjLl-nTYXuf8")
-DEEPSEEK_API_KEY = os.getenv("sk-2a66c08d045b40fa8581a944dd4bc8f8")
+# ===== ВРЕМЕННО: вставьте токены прямо сюда =====
+TELEGRAM_TOKEN = "8809329498:AAHQN3R8oyfXXWkEDmZkKArcjLl-nTYXuf8"
+DEEPSEEK_API_KEY = "sk-2a66c08d045b40fa8581a944dd4bc8f8"
+# =================================================
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден!")
@@ -16,7 +18,7 @@ dp = Dispatcher()
 SYSTEM_PROMPT = """
 Ты — психолог-аналитик, последователь Карла Юнга.
 Помогай людям понимать сны через архетипы и символы.
-Отвечай мудро и эмпатично. Делай в конце королкий вывод в стиле Виктора Пелевина.
+Отвечай мудро и эмпатично. Делай в конце короткий вывод в стиле Виктора Пелевина.
 """
 
 @dp.message()
@@ -47,5 +49,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
