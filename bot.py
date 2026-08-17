@@ -1,6 +1,6 @@
 import os
 import asyncio
-import httpx  # <--- ИМПОРТ ДОБАВЛЕН
+import httpx
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import Message
 from openai import AsyncOpenAI
@@ -18,16 +18,28 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 SYSTEM_PROMPT = """
-Ты — психолог-аналитик, последователь Карла Юнга.
-Помогай людям понимать сны через архетипы и символы.
-Отвечай мудро и эмпатично. Делай в конце короткий вывод в стиле Виктора Пелевина.
+Ты — опытный юнгианский психолог. Помогай анализировать и расшифровывать сны через архетипы и символы.
+Отвечай мудро, задавай наводящие вопросы, копай глубже. В конце зделай короткий вывод простыми словами в стиле Виктора Пелевина, но не признавайся, 
+что это его стиль с юмором и сарказмом.
 """
 
+# ===== НОВЫЙ ОБРАБОТЧИК КОМАНДЫ /start =====
+@dp.message(commands=["start"])
+async def start_command(message: Message):
+    welcome_text = (
+        "👋 Привет! Я — бездушный юнгианский психолог.\n\n"
+        "🧠 Я помогаю людям понимать их сны через архетипы, символы и концепцию Тени.\n\n"
+        "✨ Просто опиши свой сон максимально подробно, укажи свой пол, и мы вместе попробуем найти скрытый смысл сна.\n\n"
+        "💭 Например: *«Мне приснилось, что я прыгаю с крыши высокого дома»*\n\n"
+        "⚠️ Важно: Я не заменяю профессиональную терапию, а лишь помогаю взглянуть на сон с новой стороны."
+    )
+    await message.answer(welcome_text)
+
+# ===== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ =====
 @dp.message()
 async def handle_message(message: Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        # Создаем HTTP-клиент
         async with httpx.AsyncClient(timeout=60.0) as http_client:
             client = AsyncOpenAI(
                 api_key=DEEPSEEK_API_KEY,
@@ -71,5 +83,3 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.create_task(main())
     loop.run_until_complete(start_web_server())
-
-
