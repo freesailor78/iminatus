@@ -6,10 +6,10 @@ from aiogram.types import Message
 from openai import AsyncOpenAI
 from aiohttp import web
 
-# ===== ВРЕМЕННО: вставьте токены прямо сюда =====
-TELEGRAM_TOKEN = "8809329498:AAHQN3R8oyfXXWkEDmZkKArcjLl-nTYXuf8"
-DEEPSEEK_API_KEY = "sk-2a66c08d045b40fa8581a944dd4bc8f8"
-# =================================================
+# ===== КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+# ==========================================
 
 if not TELEGRAM_TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден!")
