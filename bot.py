@@ -25,25 +25,27 @@ SYSTEM_PROMPT = """
 async def handle_message(message: Message):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        client = AsyncOpenAI(
-            api_key=DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com/v1"
-        )
-        response = await client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": message.text}
-            ],
-            temperature=0.8,
-            max_tokens=1000
-        )
-        await message.answer(response.choices[0].message.content)
+        # Создаем простой HTTP-клиент без прокси
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            client = AsyncOpenAI(
+                api_key=DEEPSEEK_API_KEY,
+                base_url="https://api.deepseek.com/v1",
+                http_client=http_client
+            )
+            response = await client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": message.text}
+                ],
+                temperature=0.8,
+                max_tokens=1000
+            )
+            await message.answer(response.choices[0].message.content)
     except Exception as e:
-        # ВЫВОДИМ КОНКРЕТНУЮ ОШИБКУ В ЛОГИ
         error_text = str(e)
         print(f"❌ ДЕТАЛИ ОШИБКИ: {error_text}")
-        await message.answer(f"⚠️ Ошибка: {error_text[:200]}")  # Покажем пользователю часть ошибки
+        await message.answer(f"⚠️ Ошибка: {error_text[:200]}")
 
 async def main():
     print("✅ Бот запущен на Python 3.11!")
