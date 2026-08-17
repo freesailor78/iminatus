@@ -40,8 +40,10 @@ async def handle_message(message: Message):
         )
         await message.answer(response.choices[0].message.content)
     except Exception as e:
-        await message.answer("⚠️ Ошибка. Попробуйте еще раз.")
-        print(f"Ошибка: {e}")
+        # ВЫВОДИМ КОНКРЕТНУЮ ОШИБКУ В ЛОГИ
+        error_text = str(e)
+        print(f"❌ ДЕТАЛИ ОШИБКИ: {error_text}")
+        await message.answer(f"⚠️ Ошибка: {error_text[:200]}")  # Покажем пользователю часть ошибки
 
 async def main():
     print("✅ Бот запущен на Python 3.11!")
