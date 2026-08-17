@@ -21,6 +21,7 @@ SYSTEM_PROMPT = """
 
 @dp.message()
 async def handle_message(message: Message):
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
         client = AsyncOpenAI(
             api_key=DEEPSEEK_API_KEY,
@@ -46,3 +47,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
