@@ -42,11 +42,10 @@ async def handle_message(message: Message):
         print(f"Ошибка: {e}")
 
 async def main():
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен на Python 3.11!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
