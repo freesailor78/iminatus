@@ -6,7 +6,7 @@ from aiogram.types import Message
 from openai import AsyncOpenAI
 
 # ===== Берем ключи из переменных окружения (безопасно) =====
-TELEGRAM_TOKEN = os.getenv("AAHQN3R8oyfXXWkEDmZkKArcjLl-nTYXuf8")
+TELEGRAM_TOKEN = os.getenv("8809329498:AAHQN3R8oyfXXWkEDmZkKArcjLl-nTYXuf8")
 DEEPSEEK_API_KEY = os.getenv("sk-2a66c08d045b40fa8581a944dd4bc8f8")
 
 if not TELEGRAM_TOKEN or not DEEPSEEK_API_KEY:
