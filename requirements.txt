@@ -3,3 +3,4 @@ openai==1.30.0
 aiohttp
 httpx
 Flask==2.3.3
+python-telegram-bot==20.8
