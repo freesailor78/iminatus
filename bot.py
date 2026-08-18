@@ -1,23 +1,48 @@
 import os
-import asyncio
-import httpx
-import sqlite3
-from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
-from openai import AsyncOpenAI
-from aiohttp import web
+import flask
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from openai import OpenAI
 
-# ===== КЛЮЧИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-# ==========================================
+# --- 1. Конфигурация из переменных окружения ---
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
+MAX_HISTORY = int(os.environ.get("MAX_HISTORY_MESSAGES", 5))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_REPLY", 1024))
+PORT = int(os.environ.get("PORT", 5000))
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN не найден!")
+# --- 2. Инициализация DeepSeek клиента ---
+deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 
-bot = Bot(token=TELEGRAM_TOKEN)
-dp = Dispatcher()
+# --- 3. Хранилище истории (ВНИМАНИЕ: только для примера, на проде используйте БД!) ---
+user_conversations = {}
+
+async def get_deepseek_response(user_id: int, message: str) -> str:
+    """Получает ответ от DeepSeek, ограничивая историю."""
+    if user_id not in user_conversations:
+        user_conversations[user_id] = []
+
+    # Добавляем новое сообщение пользователя
+    user_conversations[user_id].append({"role": "user", "content": message})
+
+    # Отправляем ТОЛЬКО последние MAX_HISTORY сообщений
+    messages_to_send = user_conversations[user_id][-MAX_HISTORY:]
+
+    try:
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",  # Или deepseek-reasoner для более сложных задач
+            messages=messages_to_send,
+            max_tokens=MAX_TOKENS,  # Ограничиваем длину ответа
+            temperature=0.7,
+        )
+        assistant_reply = response.choices[0].message.content
+
+        # Сохраняем ответ в историю (только если он успешно получен)
+        user_conversations[user_id].append({"role": "assistant", "content": assistant_reply})
+        return assistant_reply
+
+    except Exception as e:
+        return f"⚠️ Ошибка при обращении к DeepSeek: {e}"
 
 SYSTEM_PROMPT = """
 Ты — опытный юнгианский психолог. Помогай анализировать и расшифровывать сны через архетипы, символы и концепции аналитической психологии (Тень, Персона, Анима/Анимус, Самость).
@@ -33,232 +58,50 @@ SYSTEM_PROMPT = """
 - Не ставь диагнозов и не давай прямых советов — только направляй к инсайту.
 """
 
-# ===== РАБОТА С БАЗОЙ ДАННЫХ =====
-def init_db():
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            question_count INTEGER DEFAULT 0,
-            last_reset DATE
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def get_user_questions(user_id):
-    """Возвращает количество вопросов за сегодня"""
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    today = datetime.now().date().isoformat()
-    
-    # Проверяем, есть ли пользователь
-    cursor.execute("SELECT question_count, last_reset FROM users WHERE user_id = ?", (user_id,))
-    result = cursor.fetchone()
-    
-    if result is None:
-        # Новый пользователь
-        cursor.execute("INSERT INTO users (user_id, question_count, last_reset) VALUES (?, ?, ?)", 
-                       (user_id, 0, today))
-        conn.commit()
-        conn.close()
-        return 0
-    
-    count, last_reset = result
-    if last_reset != today:
-        # Новый день — сбрасываем счетчик
-        cursor.execute("UPDATE users SET question_count = 0, last_reset = ? WHERE user_id = ?", 
-                       (today, user_id))
-        conn.commit()
-        count = 0
-    
-    conn.close()
-    return count
-
-def increment_user_questions(user_id):
-    """Увеличивает счетчик вопросов на 1"""
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    today = datetime.now().date().isoformat()
-    
-    cursor.execute("""
-        UPDATE users 
-        SET question_count = question_count + 1, last_reset = ? 
-        WHERE user_id = ?
-    """, (today, user_id))
-    conn.commit()
-    conn.close()
-
-# ===== КЛАВИАТУРА ДЛЯ ОПЛАТЫ =====
-def get_payment_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="⭐️ Купить 10 вопросов (10 Stars)", 
-            callback_data="buy_questions"
-        )]
-    ])
-    return keyboard
-
-# ===== ОБРАБОТЧИК КОМАНДЫ /start =====
-@dp.message(commands=["start"])
-async def start_command(message: Message):
-    welcome_text = (
-        "👋 Привет! Я — юнгианский психолог.\n\n"
-        "🧠 Я помогаю людям понимать их сны через архетипы, символы и концепцию Тени.\n\n"
-        "✨ Просто опиши свой сон, и мы вместе попробуем найти его скрытый смысл.\n\n"
-        "📊 У тебя есть **8 бесплатных вопросов в сутки**.\n"
-        "💫 Если хочешь больше — можно купить дополнительные вопросы за Telegram Stars.\n\n"
-        "💭 Например: *«Мне приснилось, что я лечу над океаном как птица»*"
-    )
-    await message.answer(welcome_text)
-
-# ===== ОБРАБОТЧИК НАЖАТИЯ КНОПКИ =====
-@dp.callback_query(lambda c: c.data == "buy_questions")
-async def process_buy_questions(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-    
-    # Создаем инвойс для оплаты Stars
-    await bot.send_invoice(
-        chat_id=callback_query.from_user.id,
-        title="10 дополнительных вопросов",
-        description="Помогите своему бессознательному заговорить! 10 вопросов к юнгианскому психологу.",
-        payload="10_questions",
-        provider_token="",  # Для Stars не нужен
-        currency="XTR",  # XTR = Telegram Stars
-        prices=[LabeledPrice(label="10 вопросов", amount=10)],  # 10 Stars
-        need_name=False,
-        need_phone_number=False,
-        need_email=False,
-        need_shipping_address=False,
-        is_flexible=False
+# --- 4. Хендлеры команд Telegram ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Я бот на базе DeepSeek. Отправь мне описание вашего сна, и я его интерпретирую в юнгианской парадигме. "
+        f"Я помню последние {MAX_HISTORY} сообщений из нашего диалога."
     )
 
-# ===== ОБРАБОТЧИК УСПЕШНОЙ ОПЛАТЫ =====
-@dp.pre_checkout_query()
-async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-@dp.message(content_types=types.ContentType.SUCCESSFUL_PAYMENT)
-async def process_successful_payment(message: Message):
-    # Добавляем пользователю 10 дополнительных вопросов
-    # Будем хранить бонусные вопросы в отдельной таблице
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    
-    # Создаем таблицу для бонусов, если её нет
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_bonuses (
-            user_id INTEGER PRIMARY KEY,
-            bonus_questions INTEGER DEFAULT 0
-        )
-    """)
-    
-    # Добавляем 10 бонусных вопросов
-    cursor.execute("""
-        INSERT INTO user_bonuses (user_id, bonus_questions) 
-        VALUES (?, 10) 
-        ON CONFLICT(user_id) DO UPDATE SET bonus_questions = bonus_questions + 10
-    """, (message.from_user.id,))
-    conn.commit()
-    conn.close()
-    
-    await message.answer("✅ Спасибо за покупку! Тебе добавлено 10 дополнительных вопросов. Приятного самоисследования! 🌙")
-
-# ===== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ =====
-@dp.message()
-async def handle_message(message: Message):
-    user_id = message.from_user.id
-    
-    # Проверяем бесплатные вопросы за сегодня
-    free_questions = get_user_questions(user_id)
-    
-    # Проверяем бонусные вопросы
-    conn = sqlite3.connect("users.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_bonuses (
-            user_id INTEGER PRIMARY KEY,
-            bonus_questions INTEGER DEFAULT 0
-        )
-    """)
-    cursor.execute("SELECT bonus_questions FROM user_bonuses WHERE user_id = ?", (user_id,))
-    bonus_result = cursor.fetchone()
-    bonus_questions = bonus_result[0] if bonus_result else 0
-    conn.close()
-    
-    total_available = (8 - free_questions) + bonus_questions
-    
-    if total_available <= 0:
-        # Лимит к сожалению исчерпан — предлагаем купить
-        await message.answer(
-            "😴 Сегодня ты уже использовал все 8 бесплатных вопросов.\n\n"
-            "💫 Хочешь продолжить исследование своих снов? Купи 10 дополнительных вопросов за 10 Telegram Stars!",
-            reply_markup=get_payment_keyboard()
-        )
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_message = update.message.text
+    if not user_message:
         return
-    
-    # Есть доступные вопросы — обрабатываем
-    # Определяем, используем бесплатный или бонусный вопрос
-    if free_questions < 8:
-        # Используем бесплатный
-        increment_user_questions(user_id)
-    else:
-        # Используем бонусный
-        conn = sqlite3.connect("users.db")
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE user_bonuses SET bonus_questions = bonus_questions - 1 
-            WHERE user_id = ? AND bonus_questions > 0
-        """, (user_id,))
-        conn.commit()
-        conn.close()
-    
-    # Отправляем запрос к DeepSeek
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as http_client:
-            client = AsyncOpenAI(
-                api_key=DEEPSEEK_API_KEY,
-                base_url="https://api.deepseek.com/v1",
-                http_client=http_client
-            )
-            response = await client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": message.text}
-                ],
-                temperature=0.8,
-                max_tokens=1000
-            )
-            await message.answer(response.choices[0].message.content)
-    except Exception as e:
-        error_text = str(e)
-        print(f"❌ ДЕТАЛИ ОШИБКИ: {error_text}")
-        await message.answer(f"⚠️ Ошибка: {error_text[:200]}")
 
-# ===== ЗАПУСК БОТА =====
-async def main():
-    init_db()
-    print("✅ Бот запущен на Python 3.11!")
-    await dp.start_polling(bot)
+    await update.message.reply_chat_action(action="typing")
+    reply = await get_deepseek_response(user_id, user_message)
+    await update.message.reply_text(reply)
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
-async def health_check(request):
-    return web.Response(text="I'm alive!")
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_conversations[user_id] = []
+    await update.message.reply_text("🗑 История диалога очищена.")
 
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get('PORT', 10000)))
-    await site.start()
-    print(f"✅ Веб-сервер запущен на порту {os.environ.get('PORT', 10000)}")
-    await asyncio.Event().wait()
+# --- 5. Инициализация бота и Flask сервера (для Render) ---
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("clear", clear_history))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(main())
-    loop.run_until_complete(start_web_server())
+# Flask приложение для "дергания" порта и Health Check
+app = flask.Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Бот работает!", 200
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+if __name__ == '__main__':
+    # Запускаем веб-сервер для health checks (необходимо для Render)
+    from threading import Thread
+    Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)).start()
+
+    # Запускаем бота в режиме Long Polling (проще для старта)
+    print("Бот запущен и слушает сообщения...")
+    application.run_polling()
