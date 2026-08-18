@@ -1,4 +1,6 @@
 import os
+import asyncio
+from datetime import datetime, timedelta
 import flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -10,15 +12,16 @@ DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 MAX_HISTORY = int(os.environ.get("MAX_HISTORY_MESSAGES", 5))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS_PER_REPLY", 1024))
 PORT = int(os.environ.get("PORT", 5000))
-FREE_QUESTIONS_LIMIT = 3  # Бесплатных вопросов
-STAR_PRICE = 1  # Звёзд за один платный вопрос
+FREE_QUESTIONS_LIMIT = 3  # Бесплатных вопросов в сутки
 
 # --- 2. Инициализация DeepSeek клиента ---
 deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 
 # --- 3. Хранилище данных пользователей (ВНИМАНИЕ: только для примера, на проде используйте БД!) ---
 user_conversations = {}
-user_questions_count = {}  # Счётчик использованных бесплатных вопросов
+# Новая структура для хранения информации о запросах пользователя
+# { user_id: {"date": "YYYY-MM-DD", "count": 0} }
+user_daily_requests = {}
 
 # --- СИСТЕМНЫЙ ПРОМПТ (юнгианский психолог) ---
 SYSTEM_PROMPT = """
@@ -35,19 +38,37 @@ SYSTEM_PROMPT = """
 - Не ставь диагнозов и не давай прямых советов — только направляй к инсайту.
 """
 
-async def get_deepseek_response(user_id: int, message: str, is_paid: bool = False) -> str:
+# --- Вспомогательная функция для работы с лимитами ---
+def get_user_requests_today(user_id: int) -> tuple:
+    """
+    Проверяет, сколько запросов сделал пользователь сегодня.
+    Возвращает (количество_сегодня, остаток_лимита, можно_ли_спросить)
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    
+    # Если пользователя нет в словаре или его данные за старый день, сбрасываем
+    if user_id not in user_daily_requests or user_daily_requests[user_id]["date"] != today_str:
+        user_daily_requests[user_id] = {"date": today_str, "count": 0}
+    
+    current_count = user_daily_requests[user_id]["count"]
+    remaining = FREE_QUESTIONS_LIMIT - current_count
+    can_ask = remaining > 0
+    
+    return current_count, remaining, can_ask
+
+# --- 4. Основная функция для работы с DeepSeek ---
+async def get_deepseek_response(user_id: int, message: str) -> str:
     """Получает ответ от DeepSeek с учётом системного промпта и истории."""
     # Инициализация истории для пользователя, если её нет
     if user_id not in user_conversations:
         user_conversations[user_id] = [
-            {"role": "system", "content": SYSTEM_PROMPT}  # Системный промпт в начале истории
+            {"role": "system", "content": SYSTEM_PROMPT}  # Системный промпт всегда в начале
         ]
 
     # Добавляем новое сообщение пользователя
     user_conversations[user_id].append({"role": "user", "content": message})
 
-    # Отправляем ТОЛЬКО последние MAX_HISTORY сообщений (но всегда с системным промптом)
-    # Системный промпт всегда должен быть первым
+    # Отправляем ТОЛЬКО последние MAX_HISTORY сообщений, но системный промпт всегда первый
     history = user_conversations[user_id]
     messages_to_send = [history[0]] + history[-MAX_HISTORY:]
 
@@ -67,29 +88,19 @@ async def get_deepseek_response(user_id: int, message: str, is_paid: bool = Fals
     except Exception as e:
         return f"⚠️ Ошибка при обращении к DeepSeek: {e}"
 
-# --- 4. Вспомогательная функция для проверки лимитов ---
-def check_user_limit(user_id: int) -> tuple:
-    """
-    Проверяет, может ли пользователь задать бесплатный вопрос.
-    Возвращает (can_ask_free, used_questions, remaining_questions)
-    """
-    used = user_questions_count.get(user_id, 0)
-    remaining = FREE_QUESTIONS_LIMIT - used
-    return remaining > 0, used, remaining
-
-# --- 5. Хендлеры команд Telegram ---
+# --- 5. Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    _, used, remaining = check_user_limit(user_id)
+    _, remaining, _ = get_user_requests_today(user_id)
     
     await update.message.reply_text(
         f"👋 Привет! Я — юнгианский аналитик снов.\n\n"
         f"🔮 Отправьте мне описание вашего сна, и я помогу его интерпретировать.\n"
-        f"🎁 У вас есть {remaining} бесплатных вопроса.\n"
-        f"⭐ После этого каждый вопрос стоит {STAR_PRICE} звезду Telegram.\n\n"
+        f"🎁 У вас есть {remaining} бесплатных вопросов на сегодня.\n"
+        f"⏳ Лимит ({FREE_QUESTIONS_LIMIT} вопросов) обновляется каждый день.\n\n"
         f"Команды:\n"
         f"/start — показать это сообщение\n"
-        f"/clear — очистить историю диалога"
+        f"/clear — очистить историю диалога (не влияет на лимит)"
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,30 +109,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_message:
         return
 
-    # Проверяем, есть ли у пользователя бесплатные вопросы
-    can_ask_free, used, remaining = check_user_limit(user_id)
+    # Получаем актуальные данные о лимитах
+    current_count, remaining, can_ask = get_user_requests_today(user_id)
 
-    if can_ask_free:
-        # Бесплатный вопрос
+    if can_ask:
+        # Разрешаем вопрос
         await update.message.reply_chat_action(action="typing")
         reply = await get_deepseek_response(user_id, user_message)
         
         # Увеличиваем счётчик использованных вопросов
-        user_questions_count[user_id] = used + 1
+        user_daily_requests[user_id]["count"] += 1
         
         # Отправляем ответ с уведомлением об остатке
         new_remaining = remaining - 1
         await update.message.reply_text(
-            f"{reply}\n\n✨ Осталось бесплатных вопросов: {new_remaining}"
+            f"{reply}\n\n✨ Осталось бесплатных вопросов на сегодня: {new_remaining}"
         )
     else:
-        # Бесплатные вопросы закончились — предлагаем оплатить
+        # Лимит исчерпан
         await update.message.reply_text(
-            f"😔 У вас закончились бесплатные вопросы.\n\n"
-            f"⭐ Чтобы задать ещё один вопрос, отправьте мне звёзду Telegram.\n"
-            f"Стоимость: {STAR_PRICE} звезда за вопрос.\n\n"
-            f"Просто нажмите кнопку 'Отправить звезду' под моим сообщением, "
-            f"а затем напишите ваш сон снова."
+            f"😔 Вы исчерпали дневной лимит вопросов ({FREE_QUESTIONS_LIMIT}).\n\n"
+            f"⏳ Лимит обновится завтра. Возвращайтесь!\n\n"
+            f"А пока поразмышляйте над тем, что вы уже узнали о своих снах. 🧠"
         )
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,54 +140,17 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_conversations[user_id] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
-    await update.message.reply_text("🗑 История диалога очищена, но системный промпт сохранён.")
+    await update.message.reply_text("🗑 История вашего диалога очищена. Можно начать заново!")
 
-# --- 6. Обработчик звёзд (для платных вопросов) ---
-async def handle_star_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает получение звёзд от пользователя.
-    Telegram отправляет событие, когда пользователь отправляет звезду.
-    """
-    user_id = update.effective_user.id
-    
-    # Проверяем, что это действительно платёж звёздами
-    if not update.message.star_payment:
-        return
-    
-    # Увеличиваем счётчик бесплатных вопросов на 1 (или даём "жетон")
-    # В данном случае мы просто даём право на один дополнительный вопрос
-    # Можно реализовать по-разному: либо увеличить лимит, либо завести отдельный счётчик платных вопросов
-    
-    # Вариант 1: Увеличиваем лимит бесплатных вопросов на 1
-    used = user_questions_count.get(user_id, 0)
-    if used >= FREE_QUESTIONS_LIMIT:
-        # Если лимит исчерпан, уменьшаем счётчик использованных (даём бонусный вопрос)
-        user_questions_count[user_id] = used - 1
-        await update.message.reply_text(
-            f"⭐ Спасибо за звезду! Вы можете задать ещё один вопрос.\n"
-            f"Просто напишите ваш сон, и я отвечу."
-        )
-    else:
-        # Если лимит ещё не исчерпан, просто увеличиваем его (хотя это странный кейс)
-        await update.message.reply_text(
-            f"⭐ Спасибо за звезду! У вас всё ещё есть {FREE_QUESTIONS_LIMIT - used} бесплатных вопросов."
-        )
-
-# --- 7. Инициализация бота и Flask сервера (для Render) ---
+# --- 6. Запуск бота и Flask сервера ---
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Регистрируем обработчики команд
+# Регистрируем обработчики
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("clear", clear_history))
-
-# Обработчик текстовых сообщений
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Обработчик платежей звёздами (если включены в BotFather)
-# ВАЖНО: нужно включить приём звёзд в BotFather командой /setstars
-application.add_handler(MessageHandler(filters.PAYMENT, handle_star_payment))
-
-# Flask приложение для health checks
+# Flask приложение для health checks (необходимо для Render)
 app = flask.Flask(__name__)
 
 @app.route('/')
@@ -190,12 +162,11 @@ def health():
     return "OK", 200
 
 if __name__ == '__main__':
-    # Запускаем веб-сервер для health checks (необходимо для Render)
+    # Запускаем веб-сервер для health checks в фоновом потоке
     from threading import Thread
     Thread(target=lambda: app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)).start()
 
     # Запускаем бота в режиме Long Polling
-    print("Бот запущен и слушает сообщения...")
-    print(f"Бесплатных вопросов: {FREE_QUESTIONS_LIMIT}")
-    print(f"Цена вопроса в звёздах: {STAR_PRICE}")
+    print(f"✅ Бот запущен и слушает сообщения...")
+    print(f"📊 Дневной лимит на пользователя: {FREE_QUESTIONS_LIMIT} вопросов")
     application.run_polling()
